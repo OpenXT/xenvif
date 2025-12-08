@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms,
@@ -33,6 +34,7 @@
 #define _XENVIF_UTIL_H
 
 #include <ntddk.h>
+#include <intrin.h>
 
 #include "assert.h"
 
@@ -87,21 +89,21 @@ __CpuId(
     OUT PULONG  EDX OPTIONAL
     )
 {
-    ULONG       Value[4] = {0};
+    int         Value[4] = {0};
 
     __cpuid(Value, Leaf);
 
     if (EAX)
-        *EAX = Value[0];
+        *EAX = (ULONG)Value[0];
 
     if (EBX)
-        *EBX = Value[1];
+        *EBX = (ULONG)Value[1];
 
     if (ECX)
-        *ECX = Value[2];
+        *ECX = (ULONG)Value[2];
 
     if (EDX)
-        *EDX = Value[3];
+        *EDX = (ULONG)Value[3];
 }
 
 static FORCEINLINE LONG
@@ -151,8 +153,15 @@ __AllocatePoolWithTag(
     __analysis_assume(PoolType == NonPagedPool ||
                       PoolType == PagedPool);
 
+    if (NumberOfBytes == 0)
+        return NULL;
+
+#if (_MSC_VER >= 1928) // VS 16.9 (EWDK 20344 or later)
+    Buffer = ExAllocatePoolUninitialized(PoolType, NumberOfBytes, Tag);
+#else
 #pragma warning(suppress:28160) // annotation error
     Buffer = ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+#endif
     if (Buffer == NULL)
         return NULL;
 
@@ -192,7 +201,7 @@ __AllocatePages(
                                   SkipBytes,
                                   TotalBytes,
                                   MmCached,
-                                  MM_DONT_ZERO_ALLOCATION);
+                                  MM_ALLOCATE_FULLY_REQUIRED);
 
     status = STATUS_NO_MEMORY;
     if (Mdl == NULL)
@@ -210,10 +219,10 @@ __AllocatePages(
 
     MdlMappedSystemVa = MmMapLockedPagesSpecifyCache(Mdl,
                                                      KernelMode,
-						                             MmCached,
-						                             NULL,
-						                             FALSE,
-						                             NormalPagePriority);
+                                                     MmCached,
+                                                     NULL,
+                                                     FALSE,
+                                                     NormalPagePriority);
 
     status = STATUS_UNSUCCESSFUL;
     if (MdlMappedSystemVa == NULL)
@@ -225,22 +234,14 @@ __AllocatePages(
     ASSERT3P(Mdl->StartVa, ==, MdlMappedSystemVa);
     ASSERT3P(Mdl->MappedSystemVa, ==, MdlMappedSystemVa);
 
-    RtlZeroMemory(MdlMappedSystemVa, Mdl->ByteCount);
-
     return Mdl;
 
 fail3:
-    Error("fail3\n");
-
 fail2:
-    Error("fail2\n");
-
     MmFreePagesFromMdl(Mdl);
     ExFreePool(Mdl);
 
 fail1:
-    Error("fail1 (%08x)\n", status);
-
     return NULL;
 }
 

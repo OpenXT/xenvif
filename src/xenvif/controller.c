@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms,
@@ -71,6 +72,7 @@ struct _XENVIF_CONTROLLER {
     PXENBUS_EVTCHN_CHANNEL              Channel;
     ULONG                               Events;
     BOOLEAN                             Connected;
+    BOOLEAN                             Enabled;
     USHORT                              RequestId;
     struct xen_netif_ctrl_request       Request;
     struct xen_netif_ctrl_response      Response;
@@ -136,6 +138,7 @@ ControllerReleaseLock(
     __ControllerReleaseLock(Controller);
 }
 
+_IRQL_requires_min_(DISPATCH_LEVEL)
 static FORCEINLINE VOID
 __ControllerSend(
     IN  PXENVIF_CONTROLLER  Controller
@@ -176,6 +179,7 @@ ControllerPoll(
     Controller->Shared->rsp_event = rsp_cons + 1;
 }
 
+_IRQL_requires_min_(DISPATCH_LEVEL)
 static NTSTATUS
 ControllerPutRequest(
     IN  PXENVIF_CONTROLLER          Controller,
@@ -191,7 +195,7 @@ ControllerPutRequest(
     NTSTATUS                        status;
 
     status = STATUS_NOT_SUPPORTED;
-    if (!Controller->Connected)
+    if (!Controller->Enabled)
         goto fail1;
 
     status = STATUS_INSUFFICIENT_RESOURCES;
@@ -243,20 +247,28 @@ fail1:
 
 #define TIME_US(_us)        ((_us) * 10)
 #define TIME_MS(_ms)        (TIME_US((_ms) * 1000))
+#define TIME_S(_s)          (TIME_MS((_s) * 1000))
 #define TIME_RELATIVE(_t)   (-(_t))
 
-#define XENVIF_CONTROLLER_POLL_PERIOD 100 // ms
+#define XENVIF_CONTROLLER_POLL_PERIOD   TIME_MS(100)
+#define XENVIF_CONTROLLER_MAX_WAIT      TIME_S(5)
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 ControllerGetResponse(
     IN  PXENVIF_CONTROLLER          Controller,
     OUT PULONG                      Data OPTIONAL
     )
 {
-    LARGE_INTEGER                   Timeout;
+    LARGE_INTEGER                   PollTimeout;
+    LARGE_INTEGER                   MaxTimeout;
+    LARGE_INTEGER                   Start;
     NTSTATUS                        status;
 
-    Timeout.QuadPart = TIME_RELATIVE(TIME_MS(XENVIF_CONTROLLER_POLL_PERIOD));
+    PollTimeout.QuadPart = TIME_RELATIVE(XENVIF_CONTROLLER_POLL_PERIOD);
+    MaxTimeout.QuadPart = TIME_RELATIVE(XENVIF_CONTROLLER_MAX_WAIT);
+
+    KeQuerySystemTime(&Start);
 
     for (;;) {
         ULONG   Count;
@@ -275,9 +287,27 @@ ControllerGetResponse(
                                &Controller->EvtchnInterface,
                                Controller->Channel,
                                Count + 1,
-                               &Timeout);
-        if (status == STATUS_TIMEOUT)
+                               &PollTimeout);
+        if (status == STATUS_TIMEOUT) {
+            LARGE_INTEGER       Now;
+            LONGLONG            Delta;
+
+            KeQuerySystemTime(&Now);
+
+            // Relative timeout
+            Delta = Now.QuadPart - Start.QuadPart;
+            if (Delta > -MaxTimeout.QuadPart)
+                break;
+
             __ControllerSend(Controller);
+        }
+    }
+
+    // Use STATUS_TRANSACTION_TIMED_OUT as an error code since STATUS_TIMEOUT is
+    // a success code.
+    if (Controller->Response.id != Controller->Request.id) {
+        status = STATUS_TRANSACTION_TIMED_OUT;
+        goto done;
     }
 
     ASSERT3U(Controller->Response.type, ==, Controller->Request.type);
@@ -307,6 +337,7 @@ ControllerGetResponse(
     if (NT_SUCCESS(status) && Data != NULL)
         *Data = Controller->Response.data;
 
+done:
     RtlZeroMemory(&Controller->Request,
                   sizeof (struct xen_netif_ctrl_request));
     RtlZeroMemory(&Controller->Response,
@@ -317,6 +348,7 @@ ControllerGetResponse(
 
 KSERVICE_ROUTINE    ControllerEvtchnCallback;
 
+_Use_decl_annotations_
 BOOLEAN
 ControllerEvtchnCallback(
     IN  PKINTERRUPT             InterruptObject,
@@ -344,6 +376,7 @@ ControllerDebugCallback(
     UNREFERENCED_PARAMETER(Crashing);
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 ControllerInitialize(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -389,6 +422,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerConnect(
     IN  PXENVIF_CONTROLLER      Controller
@@ -455,6 +489,7 @@ ControllerConnect(
     status = XENBUS_GNTTAB(CreateCache,
                            &Controller->GnttabInterface,
                            Name,
+                           0,
                            0,
                            ControllerAcquireLock,
                            ControllerReleaseLock,
@@ -595,6 +630,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerStoreWrite(
     IN  PXENVIF_CONTROLLER          Controller,
@@ -653,7 +689,11 @@ ControllerEnable(
     IN  PXENVIF_CONTROLLER      Controller
     )
 {
-    UNREFERENCED_PARAMETER(Controller);
+    __ControllerAcquireLock(Controller);
+
+    Controller->Enabled = TRUE;
+
+    __ControllerReleaseLock(Controller);
 
     Trace("<===>\n");
 }
@@ -663,11 +703,16 @@ ControllerDisable(
     IN  PXENVIF_CONTROLLER      Controller
     )
 {
-    UNREFERENCED_PARAMETER(Controller);
+    __ControllerAcquireLock(Controller);
+
+    Controller->Enabled = FALSE;
+
+    __ControllerReleaseLock(Controller);
 
     Trace("<===>\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 VOID
 ControllerDisconnect(
     IN  PXENVIF_CONTROLLER  Controller
@@ -730,6 +775,7 @@ done:
     Trace("<====\n");
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 VOID
 ControllerTeardown(
     IN  PXENVIF_CONTROLLER  Controller
@@ -760,6 +806,7 @@ ControllerTeardown(
     __ControllerFree(Controller);
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerSetHashAlgorithm(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -800,6 +847,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerGetHashFlags(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -840,6 +888,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerSetHashFlags(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -880,6 +929,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerSetHashKey(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -974,6 +1024,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerGetHashMappingSize(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -1014,6 +1065,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerSetHashMappingSize(
     IN  PXENVIF_CONTROLLER  Controller,
@@ -1054,6 +1106,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 ControllerSetHashMapping(
     IN  PXENVIF_CONTROLLER  Controller,

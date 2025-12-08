@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  * 
  * Redistribution and use in source and binary forms, 
@@ -48,7 +49,6 @@ typedef struct _XENVIF_DRIVER {
     HANDLE              ParametersKey;
     HANDLE              AddressesKey;
     HANDLE              SettingsKey;
-    BOOLEAN             NeedReboot;
 } XENVIF_DRIVER, *PXENVIF_DRIVER;
 
 static XENVIF_DRIVER    Driver;
@@ -167,96 +167,6 @@ DriverGetSettingsKey(
     return __DriverGetSettingsKey();
 }
 
-#define MAXNAMELEN  256
-
-static FORCEINLINE VOID
-__DriverRequestReboot(
-    VOID
-    )
-{
-    PANSI_STRING    Ansi;
-    CHAR            RequestKeyName[MAXNAMELEN];
-    HANDLE          RequestKey;
-    HANDLE          SubKey;
-    NTSTATUS        status;
-
-    Info("====>\n");
-
-    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
-
-    status = RegistryQuerySzValue(__DriverGetParametersKey(),
-                                  "RequestKey",
-                                  NULL,
-                                  &Ansi);
-    if (!NT_SUCCESS(status))
-        goto fail1;
-
-    status = RtlStringCbPrintfA(RequestKeyName,
-                                MAXNAMELEN,
-                                "\\Registry\\Machine\\%Z",
-                                &Ansi[0]);
-    ASSERT(NT_SUCCESS(status));
-
-    status = RegistryCreateSubKey(NULL,
-                                  RequestKeyName,
-                                  REG_OPTION_NON_VOLATILE,
-                                  &RequestKey);
-    if (!NT_SUCCESS(status))
-        goto fail2;
-
-    status = RegistryCreateSubKey(RequestKey,
-                                  __MODULE__,
-                                  REG_OPTION_VOLATILE,
-                                  &SubKey);
-    if (!NT_SUCCESS(status))
-        goto fail3;
-
-    status = RegistryUpdateDwordValue(SubKey,
-                                      "Reboot",
-                                      1);
-    if (!NT_SUCCESS(status))
-        goto fail4;
-
-    RegistryCloseKey(SubKey);
-
-    RegistryFreeSzValue(Ansi);
-
-    Info("<====\n");
-
-    return;
-
-fail4:
-    Error("fail4\n");
-
-    RegistryCloseKey(SubKey);
-
-fail3:
-    Error("fail3\n");
-
-    RegistryCloseKey(RequestKey);
-
-fail2:
-    Error("fail2\n");
-
-    RegistryFreeSzValue(Ansi);
-
-fail1:
-    Error("fail1 (%08x)\n", status);
-}
-
-VOID
-DriverRequestReboot(
-    VOID
-    )
-{
-    if (Driver.NeedReboot)
-        return;
-
-    __DriverRequestReboot();
-
-    Driver.NeedReboot = TRUE;
-}
-
 DRIVER_UNLOAD       DriverUnload;
 
 VOID
@@ -271,8 +181,6 @@ DriverUnload(
     ASSERT3P(DriverObject, ==, __DriverGetDriverObject());
 
     Trace("====>\n");
-
-    Driver.NeedReboot = FALSE;
 
     SettingsKey = __DriverGetSettingsKey();
     __DriverSetSettingsKey(NULL);
@@ -350,7 +258,19 @@ Dispatch(
     ASSERT3P(Dx->DeviceObject, ==, DeviceObject);
 
     if (Dx->DevicePnpState == Deleted) {
+        PIO_STACK_LOCATION  StackLocation = IoGetCurrentIrpStackLocation(Irp);
+        UCHAR               MajorFunction = StackLocation->MajorFunction;
+        UCHAR               MinorFunction = StackLocation->MinorFunction;
+
         status = STATUS_NO_SUCH_DEVICE;
+
+        if (MajorFunction == IRP_MJ_PNP) {
+            /* FDO and PDO deletions can block after being marked deleted, but before IoDeleteDevice */
+            if (MinorFunction == IRP_MN_SURPRISE_REMOVAL || MinorFunction == IRP_MN_REMOVE_DEVICE)
+                status = STATUS_SUCCESS;
+
+            ASSERT((MinorFunction != IRP_MN_CANCEL_REMOVE_DEVICE) && (MinorFunction != IRP_MN_CANCEL_STOP_DEVICE));
+        }
 
         Irp->IoStatus.Status = status;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
