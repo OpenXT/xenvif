@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  * 
  * Redistribution and use in source and binary forms, 
@@ -34,6 +35,7 @@
 #include <stdlib.h>
 #include <ethernet.h>
 #include <tcpip.h>
+#include <intrin.h>
 
 #include <vif_interface.h>
 
@@ -42,8 +44,9 @@
 #include "assert.h"
 #include "util.h"
 
-static FORCEINLINE VOID
-__AccumulateChecksum(
+#if !defined(_M_X64)
+VOID
+AccumulateChecksum(
     IN OUT  PULONG  Accumulator,
     IN      PUCHAR  BaseVa,
     IN      ULONG   ByteCount
@@ -69,16 +72,7 @@ __AccumulateChecksum(
 
     *Accumulator = Current;
 }
-
-VOID
-AccumulateChecksum(
-    IN OUT  PULONG  Accumulator,
-    IN      PVOID   BaseVa,
-    IN      ULONG   ByteCount
-    )
-{
-    __AccumulateChecksum(Accumulator, BaseVa, ByteCount);
-}
+#endif
 
 BOOLEAN
 ChecksumVerify(
@@ -95,7 +89,7 @@ ChecksumVerify(
     Accumulator &= 0xFFFF;
 
     // See RFC 1624, section 5
-    __AccumulateChecksum(&Accumulator, (PUCHAR)&Embedded, sizeof (USHORT));
+    AccumulateChecksum(&Accumulator, (PUCHAR)&Embedded, sizeof (USHORT));
 
     return (Accumulator == 0xFFFF) ? TRUE : FALSE;
 }
@@ -119,7 +113,7 @@ __ChecksumIpVersion4PseudoHeader(
     Header.Protocol = Protocol;
 
     Accumulator = 0;
-    __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV4_PSEUDO_HEADER));
+    AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV4_PSEUDO_HEADER));
 
     // As-per RFC1624, Accumulator should never be 0.
     ASSERT(Accumulator != 0);
@@ -160,7 +154,7 @@ __ChecksumIpVersion6PseudoHeader(
     Header.NextHeader = Protocol;
 
     Accumulator = 0;
-    __AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV6_PSEUDO_HEADER));
+    AccumulateChecksum(&Accumulator, (PUCHAR)&Header, sizeof (IPV6_PSEUDO_HEADER));
 
     // As-per RFC1624, Accumulator should never be 0.
     ASSERT(Accumulator != 0);
@@ -249,14 +243,14 @@ ChecksumIpVersion4Header(
     Header->Checksum = 0;
 
     Accumulator = 0;
-    __AccumulateChecksum(&Accumulator,
+    AccumulateChecksum(&Accumulator,
                          StartVa + Info->IpHeader.Offset,
                          Info->IpHeader.Length);
 
     Header->Checksum = Saved;
 
     if (Info->IpOptions.Length != 0)
-        __AccumulateChecksum(&Accumulator,
+        AccumulateChecksum(&Accumulator,
                              StartVa + Info->IpOptions.Offset,
                              Info->IpOptions.Length);
 
@@ -292,14 +286,14 @@ ChecksumTcpPacket(
     TcpHeader->Checksum = 0;
 
     Accumulator = PseudoHeaderChecksum;
-    __AccumulateChecksum(&Accumulator,
+    AccumulateChecksum(&Accumulator,
                          StartVa + Info->TcpHeader.Offset,
                          Info->TcpHeader.Length);
 
     TcpHeader->Checksum = Saved;
 
     if (Info->TcpOptions.Length != 0)
-        __AccumulateChecksum(&Accumulator,
+        AccumulateChecksum(&Accumulator,
                              StartVa + Info->TcpOptions.Offset,
                              Info->TcpOptions.Length);
 
@@ -337,7 +331,7 @@ ChecksumTcpPacket(
         ByteCount -= Offset;
         ByteCount = __min(ByteCount, Length);
 
-        __AccumulateChecksum(&Accumulator, BaseVa, ByteCount);
+        AccumulateChecksum(&Accumulator, BaseVa, ByteCount);
 
         Length -= ByteCount;
 
@@ -377,7 +371,7 @@ ChecksumUdpPacket(
     UdpHeader->Checksum = 0;
 
     Accumulator = PseudoHeaderChecksum;
-    __AccumulateChecksum(&Accumulator,
+    AccumulateChecksum(&Accumulator,
                          StartVa + Info->UdpHeader.Offset,
                          Info->UdpHeader.Length);
 
@@ -416,7 +410,7 @@ ChecksumUdpPacket(
         ByteCount -= Offset;
         ByteCount = __min(ByteCount, Length);
 
-        __AccumulateChecksum(&Accumulator, BaseVa, ByteCount);
+        AccumulateChecksum(&Accumulator, BaseVa, ByteCount);
 
         Length -= ByteCount;
 

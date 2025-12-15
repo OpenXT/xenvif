@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  * 
  * Redistribution and use in source and binary forms, 
@@ -357,13 +358,15 @@ MacDumpAddressTable(
                         "mac");
 
     for (Index = 0; Index < Count; Index++) {
-        CHAR    Node[sizeof ("mac/XX")];
+        CHAR    Node[sizeof ("mac/XXXXXXXXXX")];
 
         status = RtlStringCbPrintfA(Node,
                                     sizeof (Node),
                                     "mac/%u",
                                     Index);
         ASSERT(NT_SUCCESS(status));
+        if (!NT_SUCCESS(status))
+            continue;
 
         (VOID) XENBUS_STORE(Printf,
                             &Mac->StoreInterface,
@@ -392,7 +395,7 @@ fail2:
 fail1:
     Error("fail1 (%08x)\n", status);
 
-    __MacReleaseLockExclusive(Mac);
+    __MacReleaseLockShared(Mac);
     KeLowerIrql(Irql);
 
     return status;
@@ -713,6 +716,8 @@ __MacGetSpeed(
         Unit = "G";
     } else {
         Speed = _strtoui64(Buffer, &Unit, 10);
+        if (Speed == _UI64_MAX)
+            Speed = Mac->Speed;
         if (*Unit == '\0')
             Unit = "G";
 
@@ -972,7 +977,7 @@ MacQueryMulticastAddresses(
 fail1:
     *Count = Mac->MulticastCount;
 
-    __MacReleaseLockExclusive(Mac);
+    __MacReleaseLockShared(Mac);
     KeLowerIrql(Irql);
 
     return status;
@@ -998,7 +1003,7 @@ MacSetFilterLevel(
     NTSTATUS                    status;
 
     status = STATUS_INVALID_PARAMETER;
-    if (Type >= ETHERNET_ADDRESS_TYPE_COUNT)
+    if ((ULONG)Type >= ETHERNET_ADDRESS_TYPE_COUNT)
         goto fail1;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
@@ -1008,7 +1013,7 @@ MacSetFilterLevel(
     if (Level > XENVIF_MAC_FILTER_ALL || Level < XENVIF_MAC_FILTER_NONE)
         goto fail2;
 
-    Mac->FilterLevel[Type] = Level;
+    Mac->FilterLevel[(ULONG)Type] = Level;
 
     __MacReleaseLockExclusive(Mac);
     KeLowerIrql(Irql);
@@ -1038,13 +1043,13 @@ MacQueryFilterLevel(
     NTSTATUS                        status;
 
     status = STATUS_INVALID_PARAMETER;
-    if (Type >= ETHERNET_ADDRESS_TYPE_COUNT)
+    if ((ULONG)Type >= ETHERNET_ADDRESS_TYPE_COUNT)
         goto fail1;
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
     __MacAcquireLockShared(Mac);
 
-    *Level = Mac->FilterLevel[Type];
+    *Level = Mac->FilterLevel[(ULONG)Type];
 
     __MacReleaseLockShared(Mac);
     KeLowerIrql(Irql);

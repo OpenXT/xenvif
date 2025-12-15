@@ -1,4 +1,5 @@
-/* Copyright (c) Citrix Systems Inc.
+/* Copyright (c) Xen Project.
+ * Copyright (c) Cloud Software Group, Inc.
  * All rights reserved.
  * 
  * Redistribution and use in source and binary forms, 
@@ -261,6 +262,7 @@ __FrontendGetMaxQueues(
     IN  PXENVIF_FRONTEND    Frontend
     )
 {
+    ASSERT(Frontend->MaxQueues != 0);
     return Frontend->MaxQueues;
 }
 
@@ -283,7 +285,7 @@ FrontendFormatPath(
     NTSTATUS                status;
 
     Length = (ULONG)(strlen(__FrontendGetPath(Frontend)) +
-                     strlen("/queue-XX") +
+                     strlen("/queue-XXX") +
                      1) * sizeof (CHAR);
 
     Path = __FrontendAllocate(Length);
@@ -376,6 +378,7 @@ FrontendIsBackendOnline(
     return Online;
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 static DECLSPEC_NOINLINE NTSTATUS
 FrontendEject(
     IN  PXENVIF_THREAD  Self,
@@ -706,7 +709,7 @@ FrontendDumpAddressTable(
         switch (Frontend->AddressTable[Index].si_family) {
         case AF_INET: {
             IPV4_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv4/XXXXXXXX")];
+            CHAR            Node[sizeof ("ipv4/XXXXXXXXXX")];
 
             RtlCopyMemory(Address.Byte,
                           &Frontend->AddressTable[Index].Ipv4.sin_addr.s_addr,
@@ -717,6 +720,8 @@ FrontendDumpAddressTable(
                                         "ipv4/%u",
                                         IpVersion4Count);
             ASSERT(NT_SUCCESS(status));
+            if (!NT_SUCCESS(status))
+                continue;
 
             status = XENBUS_STORE(Printf,
                                   &Frontend->StoreInterface,
@@ -736,7 +741,7 @@ FrontendDumpAddressTable(
         }
         case AF_INET6: {
             IPV6_ADDRESS    Address;
-            CHAR            Node[sizeof ("ipv6/XXXXXXXX")];
+            CHAR            Node[sizeof ("ipv6/XXXXXXXXXX")];
 
             RtlCopyMemory(Address.Byte,
                           &Frontend->AddressTable[Index].Ipv6.sin6_addr.s6_addr,
@@ -747,6 +752,8 @@ FrontendDumpAddressTable(
                                         "ipv6/%u",
                                         IpVersion6Count);
             ASSERT(NT_SUCCESS(status));
+            if (!NT_SUCCESS(status))
+                continue;
 
             status = XENBUS_STORE(Printf,
                                   &Frontend->StoreInterface,
@@ -817,6 +824,7 @@ FrontendIpAddressChange(
     ThreadWake(Frontend->MibThread);
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 static DECLSPEC_NOINLINE NTSTATUS
 FrontendMib(
     IN  PXENVIF_THREAD  Self,
@@ -975,6 +983,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetMulticastAddresses(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -1087,6 +1096,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 FrontendNotifyMulticastAddresses(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -1141,6 +1151,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetFilterLevel(
     IN  PXENVIF_FRONTEND        Frontend,
@@ -1182,6 +1193,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 VOID
 FrontendAdvertiseIpAddresses(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1225,6 +1237,7 @@ FrontendAdvertiseIpAddresses(
     KeReleaseSpinLock(&Frontend->Lock, Irql);
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendSetOnline(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1237,6 +1250,7 @@ FrontendSetOnline(
     Trace("<====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendSetOffline(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1250,6 +1264,7 @@ FrontendSetOffline(
     Trace("<====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendSetXenbusState(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -1282,6 +1297,7 @@ FrontendSetXenbusState(
           XenbusStateName(State));
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 FrontendAcquireBackend(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1328,6 +1344,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendWaitForBackendXenbusStateChange(
     IN      PXENVIF_FRONTEND    Frontend,
@@ -1341,6 +1358,7 @@ FrontendWaitForBackendXenbusStateChange(
     LARGE_INTEGER               Timeout;
     XenbusState                 Old = *State;
     NTSTATUS                    status;
+    const ULONGLONG             TotalTimeout = 120000;
 
     Trace("%s: ====> %s\n",
           __FrontendGetBackendPath(Frontend),
@@ -1364,7 +1382,7 @@ FrontendWaitForBackendXenbusStateChange(
 
     Timeout.QuadPart = 0;
 
-    while (*State == Old && TimeDelta < 120000) {
+    while (*State == Old && TimeDelta < TotalTimeout) {
         PCHAR           Buffer;
         LARGE_INTEGER   Now;
 
@@ -1372,6 +1390,7 @@ FrontendWaitForBackendXenbusStateChange(
             ULONG   Attempt = 0;
 
             while (++Attempt < 1000) {
+#pragma prefast(suppress:28121) // Timeout=0
                 status = KeWaitForSingleObject(&Event,
                                                Executive,
                                                KernelMode,
@@ -1397,7 +1416,12 @@ FrontendWaitForBackendXenbusStateChange(
                               __FrontendGetBackendPath(Frontend),
                               "state",
                               &Buffer);
-        if (!NT_SUCCESS(status)) {
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND) {
+            *State = XenbusStateUnknown;
+            Trace("%s disappeared\n",
+                  __FrontendGetBackendPath(Frontend));
+            break;
+        } else if (!NT_SUCCESS(status)) {
             *State = XenbusStateUnknown;
         } else {
             *State = (XenbusState)strtol(Buffer, NULL, 10);
@@ -1412,6 +1436,9 @@ FrontendWaitForBackendXenbusStateChange(
         TimeDelta = (Now.QuadPart - Start.QuadPart) / 10000ull;
     }
 
+    if (TimeDelta >= TotalTimeout)
+        Error("%s timed out waiting for backend state change\n", __FrontendGetBackendPath(Frontend));
+
     if (Watch != NULL)
         (VOID) XENBUS_STORE(WatchRemove,
                             &Frontend->StoreInterface,
@@ -1422,6 +1449,7 @@ FrontendWaitForBackendXenbusStateChange(
           XenbusStateName(*State));
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendReleaseBackend(
     IN      PXENVIF_FRONTEND    Frontend
@@ -1442,6 +1470,7 @@ FrontendReleaseBackend(
     Trace("<=====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendClose(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1503,6 +1532,7 @@ FrontendClose(
     Trace("<====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 FrontendPrepare(
     IN  PXENVIF_FRONTEND    Frontend
@@ -1538,8 +1568,12 @@ FrontendPrepare(
             break;
 
         case XenbusStateClosed:
-            FrontendSetXenbusState(Frontend,
-                                   XenbusStateInitialising);
+            if (FrontendIsBackendOnline(Frontend))
+                FrontendSetXenbusState(Frontend,
+                                       XenbusStateInitialising);
+            else
+                FrontendSetOffline(Frontend);
+
             break;
 
         case XenbusStateConnected:
@@ -1609,14 +1643,14 @@ __FrontendQueryStatistic(
 {
     ULONG                       Index;
 
-    ASSERT(Name < XENVIF_VIF_STATISTIC_COUNT);
+    ASSERT3U(Name, <, XENVIF_VIF_STATISTIC_COUNT);
 
     *Value = 0;
     for (Index = 0; Index < Frontend->StatisticsCount; Index++) {
         PXENVIF_FRONTEND_STATISTICS Statistics;
 
         Statistics = &Frontend->Statistics[Index];
-        *Value += Statistics->Value[Name];
+        *Value += Statistics->Value[(ULONG)Name];
     }
 }
 
@@ -1641,7 +1675,7 @@ FrontendIncrementStatistic(
     PXENVIF_FRONTEND_STATISTICS Statistics;
     KIRQL                       Irql;
 
-    ASSERT(Name < XENVIF_VIF_STATISTIC_COUNT);
+    ASSERT3U(Name, <, XENVIF_VIF_STATISTIC_COUNT);
 
     KeRaiseIrql(DISPATCH_LEVEL, &Irql);
 
@@ -1650,7 +1684,7 @@ FrontendIncrementStatistic(
     ASSERT3U(Index, <, Frontend->StatisticsCount);
     Statistics = &Frontend->Statistics[Index];
 
-    Statistics->Value[Name] += Delta;
+    Statistics->Value[(ULONG)Name] += Delta;
 
     KeLowerIrql(Irql);
 }
@@ -1760,7 +1794,7 @@ FrontendDebugCallback(
     }
 }
 
-static VOID
+static NTSTATUS
 FrontendSetNumQueues(
     IN  PXENVIF_FRONTEND    Frontend
     )
@@ -1785,10 +1819,19 @@ FrontendSetNumQueues(
         BackendMaxQueues = 1;
     }
 
+    status = STATUS_INVALID_PARAMETER;
+    if (BackendMaxQueues == 0)
+        goto fail1;
+
     Frontend->NumQueues = __min(__FrontendGetMaxQueues(Frontend),
                                 BackendMaxQueues);
 
     Info("%s: %u\n", __FrontendGetPath(Frontend), Frontend->NumQueues);
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("fail1 %08x\n", status);
+    return status;
 }
 
 static FORCEINLINE ULONG
@@ -1796,6 +1839,7 @@ __FrontendGetNumQueues(
     IN  PXENVIF_FRONTEND    Frontend
     )
 {
+    ASSERT(Frontend->NumQueues != 0);
     return Frontend->NumQueues;
 }
 
@@ -1851,6 +1895,7 @@ FrontendIsSplit(
     return __FrontendIsSplit(Frontend);
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static FORCEINLINE NTSTATUS
 __FrontendUpdateHash(
     PXENVIF_FRONTEND        Frontend,
@@ -1859,6 +1904,7 @@ __FrontendUpdateHash(
 {
     PXENVIF_CONTROLLER      Controller;
     ULONG                   Zero = 0;
+    ULONG                   NetifAlgorithm;
     ULONG                   Size;
     PULONG                  Mapping;
     ULONG                   Flags;
@@ -1868,28 +1914,31 @@ __FrontendUpdateHash(
 
     switch (Hash->Algorithm) {
     case XENVIF_PACKET_HASH_ALGORITHM_NONE:
+    case XENVIF_PACKET_HASH_ALGORITHM_UNSPECIFIED:
+        NetifAlgorithm = XEN_NETIF_CTRL_HASH_ALGORITHM_NONE;
         Size = 1;
         Mapping = &Zero;
         Flags = 0;
         break;
 
     case XENVIF_PACKET_HASH_ALGORITHM_TOEPLITZ:
+        NetifAlgorithm = XEN_NETIF_CTRL_HASH_ALGORITHM_TOEPLITZ;
         Size = Hash->Size;
         Mapping = Hash->Mapping;
         Flags = Hash->Flags;
         break;
 
-    case XENVIF_PACKET_HASH_ALGORITHM_UNSPECIFIED:
     default:
-        (VOID) ControllerSetHashAlgorithm(Controller,
-                                          XEN_NETIF_CTRL_HASH_ALGORITHM_NONE);
-        goto done;
+        return STATUS_NOT_SUPPORTED;
     }
 
     status = ControllerSetHashAlgorithm(Controller,
-                                        XEN_NETIF_CTRL_HASH_ALGORITHM_TOEPLITZ);
+                                        NetifAlgorithm);
     if (!NT_SUCCESS(status))
         goto fail1;
+
+    if (NetifAlgorithm == XEN_NETIF_CTRL_HASH_ALGORITHM_NONE)
+        goto done;
 
     status = ControllerSetHashMappingSize(Controller, Size);
     if (!NT_SUCCESS(status))
@@ -1928,6 +1977,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetHashAlgorithm(
     IN  PXENVIF_FRONTEND                Frontend,
@@ -1949,7 +1999,6 @@ FrontendSetHashAlgorithm(
     case XENVIF_PACKET_HASH_ALGORITHM_TOEPLITZ:
         // Don't allow toeplitz hashing to be configured for a single
         // queue, or if it has been explicitly disabled
-        ASSERT(__FrontendGetNumQueues(Frontend) != 0);
         status = (__FrontendGetNumQueues(Frontend) == 1 ||
                   Frontend->DisableToeplitz != 0) ?
                  STATUS_NOT_SUPPORTED :
@@ -1995,6 +2044,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendQueryHashTypes(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -2034,6 +2084,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetHashMapping(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -2077,6 +2128,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetHashKey(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -2111,6 +2163,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetHashTypes(
     IN  PXENVIF_FRONTEND    Frontend,
@@ -2186,6 +2239,7 @@ FrontendGetQueue(
     return Queue;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 FrontendConnect(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2214,20 +2268,23 @@ FrontendConnect(
     if (!NT_SUCCESS(status))
         goto fail3;
 
-    FrontendSetNumQueues(Frontend);
+    status = FrontendSetNumQueues(Frontend);
+    if (!NT_SUCCESS(status))
+        goto fail4;
+
     FrontendSetSplit(Frontend);
 
     status = ReceiverConnect(__FrontendGetReceiver(Frontend));
     if (!NT_SUCCESS(status))
-        goto fail4;
+        goto fail5;
 
     status = TransmitterConnect(__FrontendGetTransmitter(Frontend));
     if (!NT_SUCCESS(status))
-        goto fail5;
+        goto fail6;
 
     status = ControllerConnect(__FrontendGetController(Frontend));
     if (!NT_SUCCESS(status))
-        goto fail6;
+        goto fail7;
 
     Attempt = 0;
     do {
@@ -2282,7 +2339,7 @@ abort:
     } while (status == STATUS_RETRY);
 
     if (!NT_SUCCESS(status))
-        goto fail7;
+        goto fail8;
 
     State = XenbusStateUnknown;
     while (State != XenbusStateConnected) {
@@ -2321,7 +2378,7 @@ abort:
 
     status = STATUS_UNSUCCESSFUL;
     if (State != XenbusStateConnected)
-        goto fail8;
+        goto fail9;
 
     ControllerEnable(__FrontendGetController(Frontend));
 
@@ -2330,23 +2387,26 @@ abort:
     Trace("<====\n");
     return STATUS_SUCCESS;
 
+fail9:
+    Error("fail9\n");
+
 fail8:
     Error("fail8\n");
+
+    ControllerDisconnect(__FrontendGetController(Frontend));
 
 fail7:
     Error("fail7\n");
 
-    ControllerDisconnect(__FrontendGetController(Frontend));
+    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
 
 fail6:
     Error("fail6\n");
 
-    TransmitterDisconnect(__FrontendGetTransmitter(Frontend));
+    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
 
 fail5:
     Error("fail5\n");
-
-    ReceiverDisconnect(__FrontendGetReceiver(Frontend));
 
 fail4:
     Error("fail4\n");
@@ -2376,6 +2436,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendDisconnect(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2403,6 +2464,7 @@ FrontendDisconnect(
     Trace("<====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static NTSTATUS
 FrontendEnable(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2454,6 +2516,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static VOID
 FrontendDisable(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2470,6 +2533,7 @@ FrontendDisable(
     Trace("<====\n");
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendSetState(
     IN  PXENVIF_FRONTEND        Frontend,
@@ -2624,6 +2688,7 @@ FrontendSetState(
     return (!Failed) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static FORCEINLINE VOID
 __FrontendResume(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2635,6 +2700,7 @@ __FrontendResume(
     (VOID) FrontendSetState(Frontend, FRONTEND_CLOSED);
 }
 
+_IRQL_requires_(DISPATCH_LEVEL)
 static FORCEINLINE VOID
 __FrontendSuspend(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2666,6 +2732,8 @@ FrontendSuspendCallbackLate(
     __FrontendResume(Frontend);
 }
 
+_IRQL_requires_min_(PASSIVE_LEVEL)
+_IRQL_requires_max_(DISPATCH_LEVEL)
 NTSTATUS
 FrontendResume(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2742,6 +2810,8 @@ fail1:
     return status;
 }
 
+_IRQL_requires_min_(PASSIVE_LEVEL)
+_IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
 FrontendSuspend(
     IN  PXENVIF_FRONTEND    Frontend
@@ -2783,7 +2853,7 @@ FrontendSuspend(
     Trace("<====\n");
 }
 
-__drv_requiresIRQL(PASSIVE_LEVEL)
+_IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS
 FrontendInitialize(
     IN  PXENVIF_PDO         Pdo,
@@ -2993,6 +3063,7 @@ fail1:
     return status;
 }
 
+_IRQL_requires_(PASSIVE_LEVEL)
 VOID
 FrontendTeardown(
     IN  PXENVIF_FRONTEND    Frontend
